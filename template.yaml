@@ -1,0 +1,201 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  DBUsername:
+    Type: String
+    Default: "admin"
+    Description: "Username for the MySQL database"
+
+  DBPassword:
+    Type: String
+    Default: "adminpassword"
+    NoEcho: true
+    Description: "Password for the MySQL database"
+
+Resources:
+  MySQLDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: 5
+      DBInstanceIdentifier: !Sub '${AWS::StackName}-db'
+      DBInstanceClass: db.t2.micro
+      Engine: mysql
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      PubliclyAccessible: true
+      DBName: !Ref myDb
+      MultiAZ: false
+
+  MySQLDatabaseSecurityGroup:
+    Type: AWS::RDS::DBSecurityGroup
+    Properties:
+      DBSecurityGroupIngress:
+        - EC2SecurityGroupName: !GetAtt ECSClusterSecurityGroup.GroupName
+
+  ECSClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ECS Cluster
+      VpcId: vpc-04bb5c8357b36f08f 
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+
+  EcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-task'
+      Cpu: 256    # 0.5 vCPU
+      Memory: 512 # 0.5 GB
+      NetworkMode: bridge
+
+      ContainerDefinitions:
+        - Name: FlaskApp
+          Image: public.ecr.aws/f8j6t5u7/flaskapp:latest
+          PortMappings:
+            - ContainerPort: 5000
+              HostPort: 5000
+
+        - Name: MySQL
+          Image: public.ecr.aws/f8j6t5u7/mysql:latest
+          PortMappings:
+            - ContainerPort: 3306
+              HostPort: 3306
+          Environment:
+            - Name: MYSQL_DATABASE
+              Value: !Ref DBName
+            - Name: MYSQL_USER
+              Value: !Ref DBUsername
+            - Name: MYSQL_PASSWORD
+              Value: !Ref DBPassword
+            - Name: MYSQL_ROOT_PASSWORD
+              Value: !Ref DBPassword
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref 'AWS::StackName'
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'ecs'
+
+  EcsService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref EcsTaskDefinition
+      LaunchType: EC2
+      DesiredCount: 2
+      MaximumPercent: 200
+      MinimumHealthyPercent: 100
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - subnet-00ce71a0e26cf949f
+            - subnet-00vr82s9w66cg9h9k
+          SecurityGroups:
+            - !Ref ECSClusterSecurityGroup
+      LoadBalancers:
+        - ContainerName: "FlaskApp"
+          ContainerPort: 5000
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ecs-instance-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:BatchGetImage'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'ecs:CreateCluster'
+                  - 'ecs:DeregisterContainerInstance'
+                  - 'ecs:DiscoverPollEndpoint'
+                  - 'ecs:Poll'
+                  - 'ecs:RegisterContainerInstance'
+                  - 'ecs:StartTelemetrySession'
+                  - 'ecs:Submit*'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchDeleteImage'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
+  EcsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-0611295b922472c22 # Choose an appropriate AMI for your region and environment
+      IamInstanceProfile: !Ref EcsInstanceProfile
+
+  LambdaSaveData:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: lambda_save_data.lambda_handler
+      Runtime: python3.8
+      CodeUri: ./lambda_save_data/
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt MySQLDatabase.Endpoint.Address
+          DB_USER: !Ref DBUsername
+          DB_PASSWORD: !Ref DBPassword
+          DB_NAME: "your_database_name" # Replace with your actual database name
+      Policies:
+        - RDSLambdaInvokePolicy:
+            DBName: !Ref MySQLDatabase
+            Type: "AWS::RDS::DBInstance"
+
+  LambdaS3Trigger:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: lambda_s3_trigger.lambda_handler
+      Runtime: python3.10
+      CodeUri: ./lambda_s3_trigger/
+      Events:
+        S3Event:
+          Type: S3
+          Properties:
+            Bucket: !Ref projects3static
+            Events: s3:ObjectCreated:*
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      DefinitionUri: ./api_gateway/
+
+Outputs:
+  EcsServiceUrl:
+    Description: URL of the ECS service
+    Value: !Sub http://${EcsService.LoadBalancer.DNSName}:5000
+    Export:
+      Name: !Sub '${AWS::StackName}-EcsServiceUrl'
+
+  RDSHostname:
+    Description: RDS instance hostname
+    Value: !GetAtt MySQLDatabase.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-RDSHostname'

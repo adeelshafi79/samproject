@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  EcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family:
+        Fn::Sub: ${AWS::StackName}-task
+      Cpu: 256
+      Memory: 512
+      NetworkMode: bridge
+      ContainerDefinitions:
+      - Name: FlaskApp
+        Image: public.ecr.aws/f8j6t5u7/flaskapp:latest
+        PortMappings:
+        - ContainerPort: 5000
+          HostPort: 5000
+      - Name: MySQL
+        Image: public.ecr.aws/f8j6t5u7/mysql:latest
+        PortMappings:
+        - ContainerPort: 3306
+          HostPort: 3306
+  EcsService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster:
+        Ref: EcsCluster
+      TaskDefinition:
+        Ref: EcsTaskDefinition
+      LaunchType: EC2
+      DesiredCount: 1
+      MaximumPercent: 200
+      MinimumHealthyPercent: 100
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+  EcsInstanceProfile:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ecs.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: ecs-instance-policy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ecr:GetAuthorizationToken
+            - ecr:BatchCheckLayerAvailability
+            - ecr:BatchGetImage
+            Resource: '*'
+  EcsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-0611295b922472c22
+      IamInstanceProfile:
+        Ref: EcsInstanceProfile
+Outputs:
+  EcsServiceUrl:
+    Description: URL of the ECS service
+    Value:
+      Fn::Sub: http://${EcsService.LoadBalancer.DNSName}:5000
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-EcsServiceUrl
